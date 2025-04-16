@@ -1,0 +1,150 @@
+### AI Chat
+
+services:
+  traefik:
+    image: traefik:v3.2
+    container_name: "${COMPOSE_PROJECT_NAME}.traefik"
+    hostname: "traefik"
+    command:
+      # - "--log.level=DEBUG"
+      # - "--log.level=TRACE"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+
+      ## Entry points for HTTP and HTTPS
+      - "--entryPoints.web.address=:80"
+    ports:
+      - "80:80"
+      - "8080:8080"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.entrypoints=web"
+      - "traefik.http.routers.traefik.rule=HostRegexp(`^traefik\\.${LOCAL_DOMAIN_PATTERN}$`)"
+
+      - "traefik.http.services.traefik.loadbalancer.server.port=8080"
+    volumes:
+      - ${DOCKER_VOLUMES_PATH}/traefik_config:/etc/traefik
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - ai-chat-net
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17.4-alpine
+    container_name: "${COMPOSE_PROJECT_NAME}.postgres"
+    hostname: "postgres"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      OPENWEBUI_DB: ${OPENWEBUI_DB}
+      OPENWEBUI_USER: ${OPENWEBUI_USER}
+      OPENWEBUI_PASSWORD: ${OPENWEBUI_PASSWORD}
+    volumes:
+      - ${DOCKER_VOLUMES_PATH}/postgres_data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh  # Mounting the init script
+    networks:
+      - ai-chat-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # jupyter:
+  #   # ATTENTION: ARM: quay.io/jupyter/minimal-notebook:python-3.12.10
+  #   image: quay.io/jupyter/minimal-notebook:x86_64-python-3.12.10
+  #   container_name: "${COMPOSE_PROJECT_NAME}.jupyter-notebook"
+  #   hostname: "jupyter"
+  #   environment:
+  #     - JUPYTER_ENABLE_LAB=yes
+  #     - JUPYTER_TOKEN=${JUPYTER_TOKEN}
+  #   volumes:
+  #     - "${DOCKER_VOLUMES_PATH}/jupyter_data:/home/jovyan/work"
+  #   networks:
+  #     - ai-chat-net
+  #   labels:
+  #     - "traefik.enable=true"
+  #     - "traefik.http.routers.jupyter.entrypoints=web"
+  #     - "traefik.http.routers.jupyter.rule=HostRegexp(`^jupyter\\.${LOCAL_DOMAIN_PATTERN}$`)"
+
+  #     - "traefik.http.services.jupyter.loadbalancer.server.port=8888"
+  #   restart: unless-stopped
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-v1.61.7
+    container_name: "${COMPOSE_PROJECT_NAME}.litellm"
+    hostname: "litellm"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      STORE_MODEL_IN_DB: True
+    depends_on:
+      traefik:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    networks:
+      - ai-chat-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.litellm.entrypoints=web"
+      - "traefik.http.routers.litellm.rule=HostRegexp(`^litellm\\.${LOCAL_DOMAIN_PATTERN}$`)"
+
+      - "traefik.http.services.litellm.loadbalancer.server.port=4000"
+    restart: unless-stopped
+
+  openwebui:
+    ## versions:
+    # not to be used for production: main 
+    # BROKEN: v0.6.0
+    # FUNCTIONAL: v0.5.20, v0.6.1, v0.6.2, v0.6.4, v0.6.5
+    image: ghcr.io/open-webui/open-webui:v0.6.5
+    container_name: "${COMPOSE_PROJECT_NAME}.openwebui"
+    hostname: "openwebui"
+    environment:
+      WEBUI_SECRET_KEY: ${OPENWEBUI_SECRET_KEY}
+      ENABLE_OLLAMA_API: False
+      ENABLE_OPENAI_API: True
+      ENABLE_EVALUATION_ARENA_MODELS: False
+      DATABASE_URL: postgresql://${OPENWEBUI_USER}:${OPENWEBUI_PASSWORD}@postgres:5432/${OPENWEBUI_DB}
+      ENABLE_ADMIN_CHAT_ACCESS: ${ENABLE_ADMIN_CHAT_ACCESS}
+      # # Configuration for Jupyter Notebook connection
+      # ENABLE_CODE_INTERPRETER:	True
+      # CODE_EXECUTION_ENGINE: jupyter
+      # CODE_EXECUTION_JUPYTER_URL: http://jupyter:8888
+      # CODE_EXECUTION_JUPYTER_AUTH: token
+      # CODE_EXECUTION_JUPYTER_AUTH_TOKEN: ${JUPYTER_TOKEN}
+      # CODE_EXECUTION_JUPYTER_TIMEOUT: 120
+      # CODE_INTERPRETER_ENGINE: jupyter
+      # CODE_INTERPRETER_JUPYTER_URL: http://jupyter:8888
+      # CODE_INTERPRETER_JUPYTER_AUTH: token
+      # CODE_INTERPRETER_JUPYTER_AUTH_TOKEN: ${JUPYTER_TOKEN}
+      # CODE_INTERPRETER_JUPYTER_TIMEOUT: 120
+    depends_on:
+      traefik:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      litellm:  # OpenAI.com can be used without LiteLLM
+        condition: service_started
+    networks:
+      - ai-chat-net
+    volumes:
+      - "${DOCKER_VOLUMES_PATH}/open-webui:/app/backend/data"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.open-webui.entrypoints=web"
+      - "traefik.http.routers.open-webui.rule=HostRegexp(`^${HOST_NAME_PATTERN}\\.${LOCAL_DOMAIN_PATTERN}$`)"
+
+      - "traefik.http.services.openwebui.loadbalancer.server.port=8080"
+    restart: unless-stopped
+
+networks:
+  ai-chat-net:
+    external: false
+    name: ${DOCKER_NETWORK}
+    driver: bridge

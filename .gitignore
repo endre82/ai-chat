@@ -1,0 +1,11 @@
+.env
+.metals/metals.log
+.metals/metals.mv.db
+.vscode/settings.json
+traefik_config/
+letsencrypt/
+ollama/
+open-webui/
+volumes/
+old/
+docker-compose.yml
